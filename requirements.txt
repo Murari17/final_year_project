@@ -1,0 +1,5 @@
+pdfminer.six
+nltk
+sentencepiece
+torch
+numpy

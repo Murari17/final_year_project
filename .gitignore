@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+
+# Generated training artifacts
+model.pth
+tokenizer.model
+tokenizer.vocab
+
+# Generated data artifacts
+data/extracted/*.txt
+data/cleaned/chemistry_clean.txt
+data/cleaned/sentences.txt
+dataset/training_data.txt
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
