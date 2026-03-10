@@ -11,10 +11,10 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def get_pipeline_python() -> str:
-    # Prefer project-local virtual environment when available.
+    # Use the project venv if it exists so runs are consistent across machines.
     candidates = [
-        BASE_DIR / ".venv" / "bin" / "python",  # macOS/Linux
-        BASE_DIR / ".venv" / "Scripts" / "python.exe",  # Windows
+        BASE_DIR / ".venv" / "bin" / "python",  # macOS/Linux path
+        BASE_DIR / ".venv" / "Scripts" / "python.exe",  # Windows path
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -46,7 +46,7 @@ def main() -> None:
     parser.add_argument("--skip-tokenizer", action="store_true", help="Skip tokenizer training")
     args = parser.parse_args()
 
-    # Preprocessing and dataset build
+    # Build the text corpus and dataset first.
     run_step("textextraction.py")
     run_step("clean_text.py")
     run_step("sentence_split.py")

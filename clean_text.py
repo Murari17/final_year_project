@@ -13,7 +13,7 @@ def clean_text(raw: str) -> str:
 base_dir = Path(__file__).resolve().parent
 extracted_dir = base_dir / "data" / "extracted"
 cleaned_dir = base_dir / "data" / "cleaned"
-output_path = cleaned_dir / "chemistry_clean.txt"
+output_path = cleaned_dir / "corpus_clean.txt"
 
 text_files = sorted(extracted_dir.glob("*.txt"))
 if not text_files:

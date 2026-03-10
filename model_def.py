@@ -24,7 +24,7 @@ class TransformerModel(nn.Module):
         self.fc = nn.Linear(embed_size, vocab_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [batch, seq_len]
+        # Expected input shape: [batch, seq_len]
         seq_len = x.size(1)
         if seq_len > self.max_seq_len:
             raise ValueError(f"Sequence length {seq_len} exceeds max_seq_len {self.max_seq_len}")
@@ -32,7 +32,7 @@ class TransformerModel(nn.Module):
         positions = torch.arange(seq_len, device=x.device).unsqueeze(0)
         h = self.embedding(x) + self.pos_embedding(positions)
 
-        # Causal mask so token i cannot attend to future tokens j > i.
+        # Standard causal mask: each token can only see itself and earlier tokens.
         mask = torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=x.device), diagonal=1)
         h = self.encoder(h, mask=mask)
         return self.fc(h)

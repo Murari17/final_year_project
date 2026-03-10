@@ -19,7 +19,7 @@ def normalize_question(text: str) -> str:
 
 
 def build_question_from_sentence(sentence: str) -> str:
-    # Try to convert definition-like lines into direct questions.
+    # If the sentence looks like a definition, turn it into a direct question.
     m = re.match(r"^([A-Za-z][A-Za-z0-9\-\s]{2,60}?)\s+(is|are)\s+", sentence)
     if m:
         subject = normalize_question(m.group(1))
@@ -28,7 +28,7 @@ def build_question_from_sentence(sentence: str) -> str:
             return f"What is {subject}?"
         return f"What are {subject}?"
 
-    # Fallback: ask to explain a compact sentence preview.
+    # Otherwise build a short "explain this" style prompt.
     words = sentence.split()
     snippet = " ".join(words[:12]).strip()
     snippet = normalize_question(snippet)
@@ -44,7 +44,7 @@ for s in sentences:
     question = build_question_from_sentence(s)
     dataset.append(f"Ask: {question}\nAnswer: {s}\n")
 
-    # Keep one additional paraphrased prompt style for variety.
+    # Add a second prompt phrasing so training examples are less repetitive.
     short = normalize_question(" ".join(s.split()[:10]))
     dataset.append(f"Ask: Describe this: {short}\nAnswer: {s}\n")
 

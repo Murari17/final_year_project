@@ -1,23 +1,5 @@
 from pathlib import Path
-import os
 import re
-import sys
-
-
-def ensure_project_venv() -> None:
-    base_dir = Path(__file__).resolve().parent
-    candidates = [
-        base_dir / ".venv" / "bin" / "python",  # macOS/Linux
-        base_dir / ".venv" / "Scripts" / "python.exe",  # Windows
-    ]
-
-    current_python = Path(sys.executable).resolve()
-    for candidate in candidates:
-        if candidate.exists() and current_python != candidate.resolve():
-            os.execv(str(candidate), [str(candidate), str(Path(__file__).resolve()), *sys.argv[1:]])
-
-
-ensure_project_venv()
 
 import sentencepiece as spm
 import torch
@@ -25,8 +7,110 @@ import torch
 from model_def import TransformerModel
 
 
+STOPWORDS = {
+    "what", "is", "are", "the", "a", "an", "of", "in", "to", "for", "and", "or", "on", "with", "by",
+}
+
+
 def tokenize_words(text: str) -> list[str]:
     return re.findall(r"[a-zA-Z]+", text.lower())
+
+
+def normalize_output_text(text: str) -> str:
+    # Clean common OCR artifacts and squash repeated spaces.
+    text = text.replace("\u2047", " ")
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    text = text.replace("\u2018", "'").replace("\u2019", "'")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def clean_retrieved_sentence(sentence: str) -> str:
+    sentence = normalize_output_text(sentence)
+
+    # Drop common heading prefixes like "TYPES OF HARDNESS ..." before the real definition.
+    parts = sentence.split(":", 1)
+    if len(parts) == 2:
+        prefix, rest = parts[0].strip(), parts[1].strip()
+        if prefix and prefix == prefix.upper() and len(prefix.split()) <= 6:
+            sentence = rest
+
+    # Also handle headings without a colon, e.g. "TYPES OF HARDNESS Hardness of ..."
+    m = re.match(r"^([A-Z][A-Z\s]{5,})\s+(.+)$", sentence)
+    if m:
+        heading = m.group(1).strip()
+        rest = m.group(2).strip()
+        if 1 <= len(heading.split()) <= 6 and len(rest) >= 20:
+            sentence = rest
+
+    # Remove trailing list markers like "...: 1." or "... 1."
+    sentence = re.sub(r"[:\s]+\d+\.?$", "", sentence).strip()
+
+    return sentence
+
+
+def score_sentence(question: str, sentence: str) -> int:
+    q_words = set(tokenize_words(question))
+    if not q_words:
+        return 0
+
+    key_words = {w for w in q_words if w not in STOPWORDS} or q_words
+    s_words = tokenize_words(sentence)
+    if not s_words:
+        return 0
+
+    overlap = sum(1 for w in s_words if w in key_words)
+    if overlap == 0:
+        return 0
+
+    s_text = sentence.lower()
+    bonus = 0
+    q_lower = question.lower().strip()
+    if (q_lower.startswith("what is") or q_lower.startswith("what are")) and (" is " in s_text or " are " in s_text):
+        bonus += 2
+
+    keyword_density = overlap / max(1, len(s_words))
+    bonus += int(keyword_density * 10)
+    return overlap + bonus
+
+
+def trim_to_question_focus(question: str, sentence: str) -> str:
+    sentence = normalize_output_text(sentence)
+    q_lower = question.lower().strip().rstrip("?.!")
+
+    # For definition questions, anchor directly to the subject phrase when possible.
+    subject = ""
+    if q_lower.startswith("what is "):
+        subject = q_lower[len("what is "):].strip()
+    elif q_lower.startswith("what are "):
+        subject = q_lower[len("what are "):].strip()
+
+    if subject:
+        idx = sentence.lower().find(subject)
+        if idx > 0:
+            sentence = sentence[idx:]
+            return sentence.strip()
+
+    q_words = [w for w in tokenize_words(question) if w not in STOPWORDS]
+    if not q_words:
+        return sentence
+
+    s_lower = sentence.lower()
+    indices: list[int] = []
+    for w in q_words:
+        match = re.search(rf"\b{re.escape(w)}\b", s_lower)
+        if match:
+            indices.append(match.start())
+
+    if not indices:
+        return sentence
+
+    first_idx = min(indices)
+    # Keep normal starts intact; trim only when there is obvious leading noise.
+    if first_idx > 25:
+        sentence = sentence[first_idx:]
+
+    return sentence.strip()
 
 
 def retrieve_best_sentence(question: str, sentences: list[str]) -> str:
@@ -34,12 +118,9 @@ def retrieve_best_sentence(question: str, sentences: list[str]) -> str:
     if not q_words:
         return ""
 
-    stopwords = {
-        "what", "is", "are", "the", "a", "an", "of", "in", "to", "for", "and", "or", "on", "with", "by",
-    }
-    key_words = {w for w in q_words if w not in stopwords} or q_words
+    key_words = {w for w in q_words if w not in STOPWORDS} or q_words
 
-    # Prefer candidates containing all key words when possible.
+    # If possible, only keep lines that include all key terms from the question.
     strict_candidates = [s for s in sentences if all(k in s.lower() for k in key_words)]
     candidates = strict_candidates if strict_candidates else sentences
 
@@ -47,39 +128,20 @@ def retrieve_best_sentence(question: str, sentences: list[str]) -> str:
     best_score = 0
 
     for sentence in candidates:
-        s_words = tokenize_words(sentence)
-        if not s_words:
+        sentence = clean_retrieved_sentence(sentence)
+        if len(sentence) < 20 or len(sentence) > 300:
             continue
 
-        overlap = sum(1 for w in s_words if w in key_words)
-        if overlap == 0:
-            continue
-
-        s_text = sentence.lower()
-        bonus = 0
-        if "hardness of water is" in s_text:
-            bonus += 8
-        if "hardness" in s_text:
-            bonus += 2
-        if question.lower().startswith("what is") and " is " in s_text:
-            bonus += 2
-
-        score = overlap + bonus
+        score = score_sentence(question, sentence)
         if score > best_score or (score == best_score and best_sentence and len(sentence) < len(best_sentence)):
             best_score = score
             best_sentence = sentence
 
-    best_sentence = best_sentence.strip()
-    for marker in ["Hardness:", "hardness:", "Causes:", "causes:"]:
-        idx = best_sentence.find(marker)
-        if idx != -1:
-            best_sentence = best_sentence[idx:]
-            break
-
-    return best_sentence
+    return best_sentence.strip()
 
 
 def looks_weak_answer(question: str, answer: str) -> bool:
+    answer = normalize_output_text(answer)
     if not answer or len(answer) < 30:
         return True
 
@@ -90,10 +152,7 @@ def looks_weak_answer(question: str, answer: str) -> bool:
 
     q_words = set(tokenize_words(question))
     a_words = set(tokenize_words(answer))
-    stopwords = {
-        "what", "is", "are", "the", "a", "an", "of", "in", "to", "for", "and", "or", "on", "with", "by",
-    }
-    q_key_words = {w for w in q_words if w not in stopwords} or q_words
+    q_key_words = {w for w in q_words if w not in STOPWORDS} or q_words
 
     return bool(q_key_words and len(q_key_words.intersection(a_words)) == 0)
 
@@ -159,7 +218,7 @@ def generate_answer(
     if not answer:
         answer = "I need more training data to answer that clearly."
 
-    return answer
+    return normalize_output_text(answer)
 
 
 def main() -> None:
@@ -187,15 +246,20 @@ def main() -> None:
 
     prompt = input("Ask: ")
     generated = generate_answer(model, sp, prompt)
+    prompt_l = prompt.lower().strip()
+    is_definition_question = prompt_l.startswith("what is") or prompt_l.startswith("what are")
 
     if sentences_path.exists():
         with sentences_path.open("r", encoding="utf-8") as file:
             sentences = [line.strip() for line in file if line.strip()]
 
-        if looks_weak_answer(prompt, generated):
-            retrieved = retrieve_best_sentence(prompt, sentences)
+        retrieved = retrieve_best_sentence(prompt, sentences)
+        generated_score = score_sentence(prompt, generated)
+        retrieved_score = score_sentence(prompt, retrieved) if retrieved else 0
+
+        if looks_weak_answer(prompt, generated) or retrieved_score >= generated_score + 2 or (is_definition_question and retrieved_score >= generated_score):
             if retrieved:
-                generated = retrieved
+                generated = trim_to_question_focus(prompt, retrieved)
 
     print(generated)
 

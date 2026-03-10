@@ -80,7 +80,7 @@ $env:EPOCHS='30'; .\.venv\Scripts\python.exe train.py
 After running pipeline, these files are expected:
 
 - `data/extracted/*.txt`
-- `data/cleaned/chemistry_clean.txt`
+- `data/cleaned/corpus_clean.txt`
 - `data/cleaned/sentences.txt`
 - `dataset/training_data.txt`
 - `tokenizer.model`
