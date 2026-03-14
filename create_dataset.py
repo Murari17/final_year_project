@@ -35,18 +35,44 @@ def build_question_from_sentence(sentence: str) -> str:
     return f"Explain: {snippet}?"
 
 
+def build_question_variants(sentence: str) -> list[str]:
+    variants: list[str] = []
+    primary = build_question_from_sentence(sentence)
+    variants.append(primary)
+
+    # If sentence is a definition, add natural variants that keep the same answer.
+    m = re.match(r"^([A-Za-z][A-Za-z0-9\-\s]{2,60}?)\s+(is|are)\s+", sentence)
+    if m:
+        subject = normalize_question(m.group(1))
+        variants.extend([
+            f"Define {subject}.",
+            f"Explain {subject}.",
+            f"What do you mean by {subject}?",
+        ])
+    else:
+        short = normalize_question(" ".join(sentence.split()[:10]))
+        variants.append(f"Describe this: {short}")
+
+    # Preserve order while removing duplicates.
+    unique: list[str] = []
+    seen: set[str] = set()
+    for q in variants:
+        key = q.strip().lower()
+        if key and key not in seen:
+            unique.append(q.strip())
+            seen.add(key)
+
+    return unique
+
+
 for s in sentences:
     s = s.strip()
 
     if len(s) < 20:
         continue
 
-    question = build_question_from_sentence(s)
-    dataset.append(f"Ask: {question}\nAnswer: {s}\n")
-
-    # Add a second prompt phrasing so training examples are less repetitive.
-    short = normalize_question(" ".join(s.split()[:10]))
-    dataset.append(f"Ask: Describe this: {short}\nAnswer: {s}\n")
+    for question in build_question_variants(s):
+        dataset.append(f"Ask: {question}\nAnswer: {s}\n")
 
 output_dir.mkdir(parents=True, exist_ok=True)
 

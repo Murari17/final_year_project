@@ -1,0 +1,612 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage[a4paper,left=25mm,right=25mm,top=25mm,bottom=25mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{setspace}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+\setlength{\emergencystretch}{3em}
+\setstretch{1.2}
+\renewcommand{\arraystretch}{1.15}
+
+\title{Comprehensive Technical Documentation of the Local Transformer Based Small Language Model Project}
+\author{Final Year Project Documentation}
+\date{\today}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Introduction and System Intent}
+This project is an end-to-end local Question Answering (QA) pipeline built on top of a small Transformer language model and a retrieval fallback mechanism.
+The intent is to convert arbitrary domain PDFs into a queryable knowledge system without relying on external hosted LLM APIs.
+
+The system is engineered around the following practical principle:
+\begin{quote}
+``Use generation when it is good enough, and use retrieval when generation is unreliable.''
+\end{quote}
+
+This dual strategy is important because local small models trained from scratch on limited corpora can be informative but not consistently fluent.
+Retrieval improves factual reliability while generation preserves flexibility.
+
+\subsection{High-Level Pipeline}
+\[
+\begin{aligned}
+\text{PDFs} &\rightarrow \text{Raw Extracted Text} \rightarrow \text{Clean Corpus} \rightarrow \text{Sentence Bank} \\
+&\rightarrow \text{Synthetic QA Pairs} \rightarrow \text{Tokenizer} \rightarrow \text{Transformer Training} \\
+&\rightarrow \text{Inference + Retrieval Fallback}
+\end{aligned}
+\]
+
+\subsubsection{Layman explanation of the pipeline arrow chain}
+Think of the pipeline like a factory:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{PDFs}: raw textbooks/notes (unstructured).
+    \item \textbf{Raw Extracted Text}: machine-readable text pulled from PDFs.
+    \item \textbf{Clean Corpus}: corrected/normalized text.
+    \item \textbf{Sentence Bank}: clean text split into individual statements.
+    \item \textbf{Synthetic QA Pairs}: sentence statements reshaped as question-answer examples.
+    \item \textbf{Tokenizer}: text is converted into token IDs.
+    \item \textbf{Transformer Training}: model learns patterns in token sequences.
+    \item \textbf{Inference + Retrieval}: answer is produced by model; fallback retrieval is used if quality is weak.
+\end{enumerate}
+
+\section{Design Objectives and Constraints}
+\subsection{Objectives}
+\begin{enumerate}[leftmargin=1.5em]
+    \item Build an offline, local QA stack with reproducible scripts.
+    \item Support arbitrary PDF subjects, not a single fixed domain.
+    \item Keep training and inference transparent and debuggable.
+    \item Ensure data and model lifecycle can be repeated after adding new PDFs.
+\end{enumerate}
+
+\subsection{Constraints}
+\begin{itemize}[leftmargin=1.5em]
+    \item Source PDFs can contain OCR and formatting artifacts.
+    \item The model is small and data is limited compared to industrial pretraining.
+    \item Tokenization and text cleaning quality strongly affect final answers.
+    \item Local compute limits model depth/width and training time.
+\end{itemize}
+
+\section{Repository Modules and Their Roles}
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedright\arraybackslash}p{0.68\linewidth}}
+\toprule
+\textbf{Module/File} & \textbf{Detailed responsibility} \\
+\midrule
+\texttt{textextraction.py} & Scans \texttt{data/raw/} for PDFs; extracts each to text with \texttt{pdfminer.six}; writes outputs to \texttt{data/extracted/}. \\
+\texttt{clean\_text.py} & Applies corpus normalization rules to all extracted text files and writes merged output to \texttt{data/cleaned/corpus\_clean.txt}. \\
+\texttt{sentence\_split.py} & Splits merged corpus into sentence-level lines using NLTK; includes fallback behavior if tokenizer resources are unavailable. \\
+\texttt{create\_dataset.py} & Converts sentence lines into synthetic \texttt{Ask/Answer} records and generates multiple question variants (definition prompts plus short explain/describe alternatives) per sentence. \\
+\texttt{train\_tokenizer.py} & Trains SentencePiece tokenizer over the training text and exports tokenizer model/vocabulary files. \\
+\texttt{model\_def.py} & Defines Transformer architecture: embeddings, positional encoding via learned embeddings, masked self-attention stack, and output projection. \\
+\texttt{train.py} & Loads tokenizer and dataset, inserts EOS between records, applies a 90/10 train-validation split, trains with warmup+cosine LR schedule, gradient clipping, and early stopping, then saves the best checkpoint to \texttt{model.pth}. \\
+\texttt{generate.py} & Runs autoregressive generation, weak-answer checks, hybrid retrieval scoring, question-type routing (factual vs definition/open-ended), answer trimming, and grammar cleanup. \\
+\texttt{run\_pipeline.py} & Orchestrates the full pipeline with local-venv Python discovery and supports \texttt{--epochs}, \texttt{--skip-train}, and \texttt{--skip-tokenizer}. \\
+\bottomrule
+\end{longtable}
+
+\section{Data Pipeline in Full Detail}
+\subsection{Stage 1: PDF Text Extraction}
+\subsubsection{Input/Output Contract}
+\begin{itemize}[leftmargin=1.5em]
+    \item Input directory: \texttt{data/raw/}
+    \item Input type: \texttt{*.pdf}
+    \item Output directory: \texttt{data/extracted/}
+    \item Output type: one \texttt{.txt} file per PDF
+\end{itemize}
+
+\subsubsection{Operational Mechanics}
+For each PDF file $D_i$, extraction computes:
+\[
+T_i = \texttt{extract\_text}(D_i)
+\]
+and writes $T_i$ to a path in \texttt{data/extracted/}.
+
+Before writing new outputs, existing \texttt{.txt} files in \texttt{data/extracted/} are cleared so each run reflects only the current PDF set.
+
+\subsubsection{Potential Noise Sources}
+\begin{itemize}[leftmargin=1.5em]
+    \item Header/footer duplication
+    \item Broken ligatures and Unicode symbols
+    \item Irregular line breaks from multi-column layouts
+    \item Residual page artifacts and references
+\end{itemize}
+
+\subsection{Stage 2: Corpus Cleaning}
+\subsubsection{Normalization Rules}
+Given raw extracted text $R$, cleaning function $C(\cdot)$ applies regex transforms:
+\begin{align*}
+R_1 &= \text{collapse repeated newlines} \\
+R_2 &= \text{remove page-number patterns} \\
+R_3 &= \text{collapse whitespace runs}
+\end{align*}
+Then:
+\[
+C(R) = \text{strip}(R_3)
+\]
+All cleaned documents are concatenated into:
+\[
+\mathcal{C} = C(R_1) \oplus C(R_2) \oplus \cdots \oplus C(R_n)
+\]
+where $\oplus$ denotes newline-join composition.
+
+\subsubsection{Term-by-term explanation and intuition}
+Meaninng of each line:
+\begin{itemize}[leftmargin=1.5em]
+    \item $R$: original messy text.
+    \item $R_1$: after fixing repeated line breaks.
+    \item $R_2$: after removing page labels like ``Page 14''.
+    \item $R_3$: after collapsing random extra spaces.
+    \item $C(R)$: final cleaned result after trimming edges.
+\end{itemize}
+
+Why write this in steps? Because each transform has one clear purpose. In debugging, if output looks wrong, we can inspect intermediate states ($R_1, R_2, R_3$) instead of guessing.
+
+Simple derivation logic:
+\begin{enumerate}[leftmargin=1.5em]
+    \item Apply transform A to reduce one kind of noise.
+    \item Apply transform B to reduce another kind.
+    \item Repeat until text is stable enough for tokenization.
+\end{enumerate}
+
+\subsubsection{Why this stage matters mathematically}
+Tokenization and sentence splitting are sensitive to symbol and whitespace entropy.
+Cleaning reduces noisy token variants, effectively shrinking unnecessary vocabulary branches and improving token frequency concentration.
+
+\subsection{Stage 3: Sentence Segmentation}
+The cleaned corpus is segmented into sentence candidates:
+\[
+\mathcal{S} = \{s_1, s_2, \ldots, s_m\}
+\]
+Primary splitter uses NLTK's statistical sentence boundary detector.
+Fallback splitter uses punctuation regex when NLTK resources are missing.
+
+\subsection{Stage 4: Synthetic QA Dataset Construction}
+\subsubsection{Record Template}
+The generated record format is:
+\begin{verbatim}
+Ask: <question>
+Answer: <source sentence>
+\end{verbatim}
+
+\subsubsection{Question Heuristic}
+For each sentence $s$:
+\begin{itemize}[leftmargin=1.5em]
+    \item If sentence matches definition-style pattern, construct \texttt{What is ...?}/\texttt{What are ...?}
+    \item Add variants such as \texttt{Define ...}, \texttt{Explain ...}, and \texttt{What do you mean by ...?}
+    \item Else construct fallback prompts such as \texttt{Explain: ...?} and \texttt{Describe this: ...}
+    \item Remove duplicate question variants while preserving order
+\end{itemize}
+
+\subsubsection{Rationale}
+This converts unstructured sentence corpus into instruction-like text pairs that align with prompt format used during inference.
+
+\section{Tokenizer Theory and Implementation}
+\subsection{SentencePiece Role}
+Tokenizer maps text to discrete IDs:
+\[
+\tau: \text{string} \rightarrow \{0,1,\ldots,V-1\}^*
+\]
+and decoder maps back:
+\[
+\tau^{-1}: \{0,1,\ldots,V-1\}^* \rightarrow \text{string}
+\]
+
+\subsubsection{What each symbol means}
+\begin{itemize}[leftmargin=1.5em]
+    \item $\tau$: ``text to token IDs'' function.
+    \item $\tau^{-1}$: ``token IDs back to text'' function.
+    \item $V$: tokenizer vocabulary size.
+    \item $\{0,1,\ldots,V-1\}^*$: any-length sequence of valid token IDs.
+\end{itemize}
+
+In plain words: tokenizer is a translator between human text and numbers the model can process.
+
+\subsection{Why subword tokenization}
+Subwords avoid the worst of both extremes:
+\begin{itemize}[leftmargin=1.5em]
+    \item Word-level tokenization: huge OOV (Out-Of-Vocabulary) risk
+    \item Character-level tokenization: very long sequences and weak semantic chunking
+\end{itemize}
+
+\subsection{Effect on model training}
+Tokenizer quality impacts sequence length $T$, vocabulary size $V$, and frequency distribution.
+Since attention complexity is roughly $\mathcal{O}(T^2)$, better tokenization can reduce training cost and stabilize gradients.
+
+\section{Transformer Model Theory and Equations}
+\subsection{Input Representation}
+For tokenized input $x \in \mathbb{N}^{B \times T}$ (B is batch size i.e. the number of independent text sequences processed simultaneously during a single forward or backward pass and T is sequence length i.e. the total number of tokens contained in each of those sequences):
+\begin{itemize}[leftmargin=1.5em]
+    \item token embedding: $E_{tok}(x)$
+    \item position embedding: $E_{pos}(0,\ldots,T-1)$
+\end{itemize}
+Combined representation:
+\[
+H^{(0)} = E_{tok}(x) + E_{pos}
+\]
+
+\subsubsection{Terms in $H^{(0)} = E_{tok}(x) + E_{pos}$}
+\begin{itemize}[leftmargin=1.5em]
+    \item $x$: input token IDs.
+    \item $E_{tok}(x)$: meaning vectors for those tokens.
+    \item $E_{pos}$: position vectors (1st token, 2nd token, etc.).
+    \item $H^{(0)}$: final starting representation before attention layers.
+\end{itemize}
+
+Why add them? A token like ``cell'' should mean something, but position also matters.
+``Cell in battery'' and ``battery in cell'' are not the same pattern.
+
+Derivation intuition:
+\begin{enumerate}[leftmargin=1.5em]
+    \item We need semantic identity (token embedding).
+    \item We need order information (position embedding).
+    \item Addition is a simple way to combine both in the same vector space.
+\end{enumerate}
+
+\subsection{Causal Self-Attention}
+Attention scores before masking:
+\[
+A = \frac{QK^\top}{\sqrt{d_k}}
+\]
+Causal mask $M$ sets future positions to $-\infty$:
+\[
+\tilde{A}_{ij} =
+\begin{cases}
+A_{ij}, & j \le i \\
+-\infty, & j > i
+\end{cases}
+\]
+Then:
+\[
+\text{Attn}(Q,K,V)=\text{softmax}(\tilde{A})V
+\]
+
+\subsubsection{Detailed explanation of attention equations}
+\textbf{1) Score matrix:}
+\[
+A = \frac{QK^\top}{\sqrt{d_k}}
+\]
+\begin{itemize}[leftmargin=1.5em]
+    \item $Q$ (queries): what each token is ``looking for''.
+    \item $K$ (keys): what each token ``offers''.
+    \item $QK^\top$: similarity between every query and every key.
+    \item $d_k$: key dimension.
+    \item divide by $\sqrt{d_k}$: keeps values numerically stable so softmax does not saturate too hard.
+\end{itemize}
+
+\textbf{2) Causal masking:}
+Future positions are set to $-\infty$, which means after softmax they get probability near zero.
+This enforces ``no peeking ahead'' during language modeling.
+
+\textbf{3) Weighted value mix:}
+\[
+\text{Attn}(Q,K,V)=\text{softmax}(\tilde{A})V
+\]
+\begin{itemize}[leftmargin=1.5em]
+    \item softmax turns each row of scores into probabilities.
+    \item $V$ (values) are the information vectors being blended.
+    \item output is a weighted average of value vectors.
+\end{itemize}
+
+Derivation logic in words: compare tokens, normalize comparisons into weights, then combine information according to those weights.
+
+\subsection{Transformer Block (conceptual)}
+Each encoder layer internally follows the standard pattern:
+\begin{align*}
+U &= \text{LayerNorm}(H + \text{SelfAttn}(H)) \\
+H' &= \text{LayerNorm}(U + \text{FFN}(U))
+\end{align*}
+where FFN (feed-forward network) is a position-wise non-linear projection stack.
+
+\subsubsection{Why residual and layer normalization are used}
+\begin{itemize}[leftmargin=1.5em]
+    \item Residual addition ($H + \text{SelfAttn}(H)$) preserves original signal and helps gradient flow.
+    \item LayerNorm stabilizes scale/variance so training does not explode or vanish easily.
+    \item FFN adds non-linear transformation capacity beyond attention mixing.
+\end{itemize}
+
+Layman view: attention decides ``who should listen to whom'', while FFN helps each token ``think locally'' after hearing others.
+
+\subsection{Output Projection}
+Final token logits:
+\[
+Z = H'W_o + b_o, \quad Z \in \mathbb{R}^{B \times T \times V}
+\]
+
+\subsubsection{Symbols in output projection}
+\begin{itemize}[leftmargin=1.5em]
+    \item $H'$: final hidden features from Transformer layers.
+    \item $W_o$: matrix that maps hidden features to vocabulary scores.
+    \item $b_o$: bias vector.
+    \item $Z$: logits (unnormalized scores) for every possible next token.
+    \item $B$: batch size, $T$: sequence length, $V$: vocabulary size.
+\end{itemize}
+
+Purpose: convert internal representation into a score for each wordpiece token.
+
+\subsection{Sequence-length Guard}
+The forward pass enforces:
+\[
+T \leq T_{max}
+\]
+If violated, the implementation raises an exception, preventing out-of-range positional indexing.
+
+\section{Training Objective and Optimization Theory}
+\subsection{Language Modeling Target Shift}
+Given token stream $(x_1, x_2, \ldots, x_T)$:
+\begin{itemize}[leftmargin=1.5em]
+    \item model input at step $t$: $x_{\le t}$
+    \item target at step $t$: $x_{t+1}$
+\end{itemize}
+
+\subsection{Likelihood Objective}
+\[
+\max_\theta \sum_{t=1}^{T-1} \log p_\theta(x_{t+1}\mid x_{\le t})
+\]
+Equivalent minimization of cross-entropy loss:
+\[
+\mathcal{L}(\theta) = -\sum_{t=1}^{T-1}\log p_\theta(x_{t+1}\mid x_{\le t})
+\]
+
+\subsubsection{Derivation of the loss function}
+At each step, the model predicts a probability for the true next token.
+If the model is confident and correct, probability is high and penalty is low.
+If it is wrong/confused, probability is low and penalty is high.
+
+Why negative log?
+\begin{itemize}[leftmargin=1.5em]
+    \item probabilities multiply across sequence positions,
+    \item log turns multiplication into addition,
+    \item negative sign turns ``maximize probability'' into ``minimize loss''.
+\end{itemize}
+
+Term-by-term:
+\begin{itemize}[leftmargin=1.5em]
+    \item $\theta$: all model parameters.
+    \item $x_{\le t}$: context up to time $t$.
+    \item $x_{t+1}$: the true next token.
+    \item $p_\theta(\cdot)$: predicted probability under current model.
+\end{itemize}
+
+\subsection{Batch and Tensor Shapes}
+For each training segment:
+\begin{itemize}[leftmargin=1.5em]
+    \item Input shape: $[B,T]$
+    \item Logits shape: $[B,T,V]$
+    \item Flattened for CE: $[(B\cdot T),V]$ vs targets $[(B\cdot T)]$
+\end{itemize}
+
+\subsection{Optimizer}
+Adam updates are applied per parameter $w$ using moment estimates:
+\begin{align*}
+m_t &= \beta_1 m_{t-1} + (1-\beta_1)g_t \\
+v_t &= \beta_2 v_{t-1} + (1-\beta_2)g_t^2 \\
+\hat{m}_t &= \frac{m_t}{1-\beta_1^t},\quad \hat{v}_t=\frac{v_t}{1-\beta_2^t} \\
+w_t &= w_{t-1} - \eta\frac{\hat{m}_t}{\sqrt{\hat{v}_t}+\epsilon}
+\end{align*}
+
+\subsubsection{Adam equations explained step-by-step}
+\begin{itemize}[leftmargin=1.5em]
+    \item $g_t$: current gradient (direction of error reduction).
+    \item $m_t$: moving average of gradients (momentum-like direction memory).
+    \item $v_t$: moving average of squared gradients (scale memory).
+    \item $\hat{m}_t, \hat{v}_t$: bias-corrected estimates (important at early steps).
+    \item $\eta$: learning rate.
+    \item $\epsilon$: small constant to avoid divide-by-zero.
+\end{itemize}
+
+Intuition:
+\begin{enumerate}[leftmargin=1.5em]
+    \item Keep track of trend direction ($m_t$).
+    \item Keep track of how noisy/large gradients are ($v_t$).
+    \item Take bigger steps where safe, smaller steps where unstable.
+\end{enumerate}
+
+\subsection{EOS (End of Sequence) Delimiting Strategy}
+EOS token insertion between records introduces explicit sample boundaries in token stream, helping model avoid leakage from one QA pair into another.
+
+\section{Inference: Generation, Scoring, and Fallback}
+\subsection{Prompt Construction}
+Inference prompt is consistently formatted as:
+\begin{verbatim}
+Ask: <user question>
+Answer:
+\end{verbatim}
+This mirrors training format and reduces prompt-distribution shift.
+
+\subsection{Autoregressive Decoding}
+At decode step $k$:
+\begin{enumerate}[leftmargin=1.5em]
+    \item Build context tokens from prompt plus generated suffix.
+    \item Truncate to model max context if necessary.
+    \item Compute logits for last position.
+    \item Apply repetition penalty to recently used tokens.
+    \item Apply temperature scaling:
+    \[
+    z'_i = \frac{z_i}{T_{temp}}
+    \]
+    \item Apply top-$k$ filtering and sample.
+\end{enumerate}
+
+\subsubsection{Why temperature and top-$k$ are needed}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Temperature}: controls randomness. Lower values make output more deterministic.
+    \item \textbf{Top-$k$}: restricts sampling to best $k$ candidates, reducing absurd low-probability picks.
+\end{itemize}
+
+Analogy: temperature changes how adventurous the model is; top-$k$ limits choices to a shortlist.
+
+\subsection{Weak-Answer Heuristics}
+Generated output is marked weak if conditions such as these are met:
+\begin{itemize}[leftmargin=1.5em]
+    \item too short,
+    \item malformed meta-markers,
+    \item poor lexical overlap with question keywords.
+\end{itemize}
+
+\subsection{Retrieval Scoring Theory}
+For candidate sentence $s$ and question $q$:
+\begin{align*}
+\text{score}(q,s) &= \text{overlap}(q,s) + \text{bonus}(q,s)
+\end{align*}
+where overlap is keyword match count and bonus includes definition-style and density adjustments.
+
+\subsubsection{Scoring terms in plain language}
+\begin{itemize}[leftmargin=1.5em]
+    \item overlap: how many important question words appear in the candidate sentence.
+    \item bonus: extra points for sentence forms that look like direct definitions/explanations.
+\end{itemize}
+
+Purpose: choose sentences that are both relevant and concise when generation is weak.
+
+\subsection{Decision Rule}
+Let $G$ be generated answer and $R$ be top retrieved sentence:
+\begin{itemize}[leftmargin=1.5em]
+    \item If the question is factual (for example: who/where/when/which/how many), prefer retrieval directly.
+    \item If $G$ is weak, choose $R$.
+    \item Else if $\text{score}(R)$ exceeds $\text{score}(G)$ by margin, choose $R$.
+    \item Else for definition/open-ended questions, prefer retrieval when its score is at least comparable.
+    \item Otherwise keep $G$.
+\end{itemize}
+
+\subsubsection{Why a hybrid decision is better than generation-only}
+With small models, generation can be fluent but wrong, or correct but noisy.
+Retrieval-only can be accurate but rigid.
+The decision rule combines both:
+\begin{itemize}[leftmargin=1.5em]
+    \item trust generation when it is coherent and relevant,
+    \item otherwise switch to retrieval for factual stability.
+\end{itemize}
+
+\subsection{Output Normalization}
+Final text is cleaned for OCR artifacts, repeated spacing, and noisy prefixes to improve readability.
+
+\section{Complexity and Resource Considerations}
+\subsection{Training Complexity}
+Dominant Transformer attention term is approximately:
+\[
+\mathcal{O}(B\cdot T^2 \cdot d)
+\]
+with additional feed-forward cost roughly:
+\[
+\mathcal{O}(B\cdot T\cdot d\cdot d_{ff})
+\]
+
+\subsection{Inference Complexity}
+Autoregressive decoding over $K$ generated tokens requires repeated forward passes, making total compute roughly proportional to:
+\[
+\sum_{k=1}^{K} \mathcal{O}((T_0+k)^2)
+\]
+under full-sequence recomputation.
+
+\subsection{Interpretation of complexity}
+The $T^2$ term means attention cost grows quickly with sequence length.
+If you double sequence length, attention work is roughly four times larger.
+That is why good tokenization and sensible context length are crucial for local hardware.
+
+\section{Robustness Engineering Details}
+\subsection{Environment Consistency}
+Pipeline scripts prefer project-local virtual environment executables when available, reducing cross-machine dependency drift.
+
+\subsection{Fallback Layers}
+Multiple fallback layers are intentionally used:
+\begin{itemize}[leftmargin=1.5em]
+    \item Sentence splitting fallback if NLTK resources fail (without online downloads)
+    \item Retrieval fallback if generation quality is low
+    \item Text cleanup fallback for OCR artifacts
+\end{itemize}
+
+\section{Step-by-Step Operational Guide}
+\subsection{Full Pipeline Command}
+\begin{verbatim}
+.\.venv\Scripts\python.exe run_pipeline.py --epochs 30
+\end{verbatim}
+
+Optional fast-refresh run (skip tokenizer + training):
+\begin{verbatim}
+.\.venv\Scripts\python.exe run_pipeline.py --skip-tokenizer --skip-train
+\end{verbatim}
+
+\subsection{Manual Pipeline Commands}
+\begin{verbatim}
+.\.venv\Scripts\python.exe textextraction.py
+.\.venv\Scripts\python.exe clean_text.py
+.\.venv\Scripts\python.exe sentence_split.py
+.\.venv\Scripts\python.exe create_dataset.py
+.\.venv\Scripts\python.exe train_tokenizer.py
+$env:EPOCHS='30'; .\.venv\Scripts\python.exe train.py
+.\.venv\Scripts\python.exe generate.py
+\end{verbatim}
+
+\subsection{Iteration Cycle}
+Whenever new PDFs are added:
+\begin{enumerate}[leftmargin=1.5em]
+    \item Re-run extraction through dataset creation
+    \item Re-train tokenizer (recommended when vocabulary shifts)
+    \item Re-train model checkpoint
+    \item Re-evaluate sample questions
+\end{enumerate}
+
+\section{Error Analysis and Typical Failure Modes}
+\subsection{Observed Failure Types}
+\begin{itemize}[leftmargin=1.5em]
+    \item Heading leakage into answers
+    \item Punctuation corruption
+    \item Over-generic generated text
+    \item Prompt-template leakage (``Ask:'', ``Answer:'')
+\end{itemize}
+
+\subsection{Mitigation in Current System}
+\begin{itemize}[leftmargin=1.5em]
+    \item retrieval rank scoring and fallback
+    \item weak-answer filtering
+    \item normalization and trimming functions
+    \item structured prompt consistency across train and infer
+\end{itemize}
+
+\section{Validation Strategy}
+Recommended validation should include:
+\begin{enumerate}[leftmargin=1.5em]
+    \item fixed benchmark question set,
+    \item qualitative factuality checks,
+    \item comparison of generated vs retrieved outputs,
+    \item regression checks after each data/model update.
+\end{enumerate}
+
+\subsection{Practical evaluation template for this project}
+For each model version, record:
+\begin{itemize}[leftmargin=1.5em]
+    \item question,
+    \item generated answer,
+    \item retrieved fallback answer,
+    \item final selected answer,
+    \item human rating (correct / partially correct / incorrect).
+\end{itemize}
+
+This creates a simple but rigorous feedback loop for iterative improvement.
+
+\section{Future Technical Extensions}
+\begin{enumerate}[leftmargin=1.5em]
+    \item Replace sentence-level retrieval with chunk-level retrieval and reranking.
+    \item Add mixed-precision and gradient accumulation for larger batch simulation.
+    \item Developing a graphical Web UI to replace the CLI.
+\end{enumerate}
+
+\section{Conclusion}
+This project is a complete local Transformer base Small Language Model with a practical hybrid inference design.
+Its technical strength lies in explicit pipeline stages, deterministic scripting, and retrieval-augmented reliability under small-model constraints.
+With additional data quality and evaluation tooling, it can evolve into a stronger QA platform while remaining fully local and controllable.
+
+\end{document}
